@@ -22,10 +22,11 @@ defmodule Benchee.Benchmark.Measure.Memory do
     parent = self()
 
     spawn_link(fn ->
-      tracer = start_tracer(self())
+      printer = start_printer()
+      tracer = start_tracer(self(), printer)
 
       try do
-        memory_usage_info = measure_memory(fun, tracer)
+        memory_usage_info = measure_memory(fun, tracer, printer)
         send(parent, {ref, memory_usage_info})
       catch
         kind, reason -> graceful_exit(kind, reason, tracer, parent)
@@ -35,14 +36,28 @@ defmodule Benchee.Benchmark.Measure.Memory do
     end)
   end
 
+  defp start_printer() do
+    spawn(fn -> printer_loop() end)
+  end
+
+  defp printer_loop() do
+    receive do
+      info ->
+        IO.inspect(info)
+        printer_loop()
+    end
+  end
+
   defp return_memory({memory_usage, result}) when memory_usage < 0, do: {nil, result}
   defp return_memory({memory_usage, result}), do: {memory_usage, result}
 
-  defp measure_memory(fun, tracer) do
+  defp measure_memory(fun, tracer, printer) do
     word_size = :erlang.system_info(:wordsize)
     {:garbage_collection_info, heap_before} = Process.info(self(), :garbage_collection_info)
+    send(printer, heap_before)
     result = fun.()
     {:garbage_collection_info, heap_after} = Process.info(self(), :garbage_collection_info)
+    send(printer, heap_after)
     mem_collected = get_collected_memory(tracer)
 
     memory_used =
@@ -70,34 +85,45 @@ defmodule Benchee.Benchmark.Measure.Memory do
     end
   end
 
-  defp start_tracer(pid) do
+  defp start_tracer(pid, printer) do
     spawn(fn ->
       :erlang.trace(pid, true, [:garbage_collection, tracer: self()])
-      tracer_loop(pid, 0)
+      tracer_loop(pid, 0, printer)
     end)
   end
 
-  defp tracer_loop(pid, acc) do
+  defp tracer_loop(pid, acc, printer) do
     receive do
       {:get_collected_memory, reply_to, ref} ->
         send(reply_to, {ref, acc})
 
       {:trace, ^pid, :gc_minor_start, info} ->
-        listen_gc_end(pid, :gc_minor_end, acc, total_memory(info))
+        IO.puts("GC MINOR START")
+        listen_gc_end(pid, :gc_minor_end, acc, total_memory(info), printer)
 
       {:trace, ^pid, :gc_major_start, info} ->
-        listen_gc_end(pid, :gc_major_end, acc, total_memory(info))
+        IO.puts("GC MAJOR START")
+        listen_gc_end(pid, :gc_major_end, acc, total_memory(info), printer)
 
       :done ->
         exit(:normal)
+
+      other ->
+        IO.inspect(other)
+        tracer_loop(pid, acc, printer)
     end
   end
 
-  defp listen_gc_end(pid, tag, acc, mem_before) do
+  defp listen_gc_end(pid, tag, acc, mem_before, printer) do
     receive do
       {:trace, ^pid, ^tag, info} ->
+        IO.inspect(tag)
         mem_after = total_memory(info)
-        tracer_loop(pid, acc + mem_before - mem_after)
+        tracer_loop(pid, acc + mem_before - mem_after, printer)
+
+      other ->
+        IO.inspect(other)
+        tracer_loop(pid, acc, printer)
     end
   end
 
